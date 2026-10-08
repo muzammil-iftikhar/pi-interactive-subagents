@@ -86,14 +86,30 @@ function createMockExtensionApi() {
   const registeredMessageRenderers: Array<any> = [];
   const sentUserMessages: string[] = [];
   const sentMessages: Array<any> = [];
+  const emitted: Array<{ channel: string; data: any }> = [];
+  const eventHandlers = new Map<string, Array<(data: any) => void>>();
   return {
     registeredTools,
     registeredCommands,
     registeredMessageRenderers,
     sentUserMessages,
     sentMessages,
+    emitted,
+    /** Invoke handlers the extension subscribed to, as pi's event bus would. */
+    fireEvent(channel: string, data: any) {
+      for (const handler of eventHandlers.get(channel) ?? []) handler(data);
+    },
     api: {
       on() {},
+      events: {
+        emit(channel: string, data: any) {
+          emitted.push({ channel, data });
+        },
+        on(channel: string, handler: (data: any) => void) {
+          eventHandlers.set(channel, [...(eventHandlers.get(channel) ?? []), handler]);
+          return () => {};
+        },
+      },
       registerTool(tool: any) {
         registeredTools.push(tool);
       },
@@ -1304,9 +1320,12 @@ describe("subagent discovery", () => {
         { artifactDir: d, name: "worker" },
       );
       const joined = parts.join(" ");
-      // Model with thinking suffix.
+      // Model and thinking are independent flags.
       assert.ok(joined.includes("--model"), "expected --model");
-      assert.ok(joined.includes("openrouter/z-ai/glm-5.2:medium"), "expected model:thinking");
+      assert.ok(joined.includes("openrouter/z-ai/glm-5.2"), "expected model id");
+      const thinkingIdx = parts.indexOf("--thinking");
+      assert.ok(thinkingIdx >= 0, "expected --thinking");
+      assert.equal(parts[thinkingIdx + 1], "'medium'");
       // Identity written to a file and appended.
       assert.ok(joined.includes("--append-system-prompt"), "expected --append-system-prompt");
       // Default-deny restriction.
@@ -1318,6 +1337,32 @@ describe("subagent discovery", () => {
         parts[toolsIdx + 1].includes("read,write,safe_bash"),
         "expected the tool allowlist as the --tools value",
       );
+    });
+  });
+
+  it("applySandboxToParts applies thinking even when the loadout has no model", () => {
+    withTempDir((d) => {
+      const parts: string[] = [];
+      testApi.applySandboxToParts(
+        parts,
+        {
+          agent: "researcher",
+          toolAllowlist: null,
+          model: null,
+          thinking: "medium",
+          systemPromptMode: null,
+          identity: null,
+          spawnable: null,
+          autoExit: true,
+          cwd: null,
+          agentDir: null,
+        },
+        { artifactDir: d, name: "researcher" },
+      );
+      assert.equal(parts.includes("--model"), false, "expected no --model");
+      const thinkingIdx = parts.indexOf("--thinking");
+      assert.ok(thinkingIdx >= 0, "expected --thinking without a model");
+      assert.equal(parts[thinkingIdx + 1], "'medium'");
     });
   });
 
@@ -1860,8 +1905,8 @@ describe("tool registration", () => {
     const props = subagentTool.parameters.properties;
     assert.deepEqual(
       Object.keys(props).sort(),
-      ["agent", "cwd", "model", "name", "task"],
-      "only agent/task/name/model/cwd should remain",
+      ["agent", "cwd", "model", "name", "task", "worktree"],
+      "only agent/task/name/model/cwd/worktree should remain",
     );
     assert.deepEqual(
       [...(subagentTool.parameters.required ?? [])].sort(),
@@ -1874,6 +1919,35 @@ describe("tool registration", () => {
     for (const gone of ["tools", "skills", "systemPrompt", "fork", "interactive", "resumeSessionId"]) {
       assert.equal(props[gone], undefined, `expected ${gone} param to be removed`);
     }
+  });
+
+  it("worktree is an opt-in boolean, off unless explicitly set", () => {
+    const { api, registeredTools } = createMockExtensionApi();
+    (subagentsModule as any).default(api);
+
+    const subagentTool = registeredTools.find((tool) => tool.name === "subagent");
+    assert.ok(subagentTool, "expected subagent tool to be registered");
+
+    const worktree = subagentTool.parameters.properties.worktree;
+    assert.ok(worktree, "expected a worktree param");
+    assert.equal(worktree.type, "boolean");
+    assert.match(worktree.description, /OFF by default/i);
+    assert.equal(
+      (subagentTool.parameters.required ?? []).includes("worktree"),
+      false,
+      "worktree must not be required",
+    );
+  });
+
+  it("slugs subagent names into workmux handles", () => {
+    const { api } = createMockExtensionApi();
+    (subagentsModule as any).default(api);
+
+    const { subagentWorktreeHandle } = (subagentsModule as any).__test__;
+    assert.equal(subagentWorktreeHandle("Worker One!"), "worker-one");
+    assert.equal(subagentWorktreeHandle("  api-tests  "), "api-tests");
+    assert.equal(subagentWorktreeHandle("a//b"), "ab");
+    assert.equal(subagentWorktreeHandle("---"), "");
   });
 
   it("renders partial subagent tool-call args without throwing", () => {
@@ -2674,5 +2748,125 @@ describe("tmux.ts", () => {
       // Inside single quotes, everything is literal
       assert.ok(escaped.includes("$world"));
     });
+  });
+});
+
+describe("subagent activity broadcast", () => {
+  const testApi = (subagentsModule as any).__test__;
+
+  /** A pi status state for a child that is blocked on a user question. */
+  function waitingState(now: number) {
+    return observeStatus(
+      createStatusState({ source: "pi", startTimeMs: now - 60_000 }),
+      {
+        snapshot: "present",
+        updatedAt: now,
+        sequence: 1,
+        phase: "waiting",
+        waitingSince: now,
+      },
+      now,
+    );
+  }
+
+  /** A pi status state for a child that is actively working. */
+  function activeState(now: number) {
+    return observeStatus(
+      createStatusState({ source: "pi", startTimeMs: now - 60_000 }),
+      {
+        snapshot: "present",
+        updatedAt: now,
+        sequence: 1,
+        phase: "active",
+        active: true,
+        activeScope: "tool",
+        activeSince: now,
+        activityLabel: "bash",
+      },
+      now,
+    );
+  }
+
+  function makeRunning(id: string, statusState: unknown) {
+    return {
+      id,
+      name: id,
+      task: "",
+      surface: `pane-${id}`,
+      startTime: 0,
+      sessionFile: `${id}.jsonl`,
+      interactive: false,
+      statusState,
+    };
+  }
+
+  it("does not count a finished child as waiting", () => {
+    const { api, emitted } = createMockExtensionApi();
+    (subagentsModule as any).default(api);
+    const runningMap = testApi.runningSubagents as Map<string, any>;
+    runningMap.clear();
+    const broadcasts = () => emitted.filter((entry) => entry.channel === "suba:activity");
+
+    try {
+      testApi.publishSubagentActivity(api, true);
+      const now = Date.now();
+      // Phase "done" means the child is exiting. classifyStatus reports it as
+      // waiting, which used to flash a waiting window status for one tick.
+      runningMap.set("d1", makeRunning("d1", observeStatus(
+        createStatusState({ source: "pi", startTimeMs: now - 60_000 }),
+        { snapshot: "present", updatedAt: now, sequence: 1, phase: "done" },
+        now,
+      )));
+
+      testApi.publishSubagentActivity(api);
+      assert.deepEqual(broadcasts().at(-1)!.data, { activeCount: 1, waitingCount: 0 });
+    } finally {
+      runningMap.clear();
+    }
+  });
+
+  it("publishes active/waiting counts on change, on request, and at zero", () => {
+    const { api, emitted, fireEvent } = createMockExtensionApi();
+    (subagentsModule as any).default(api);
+    const runningMap = testApi.runningSubagents as Map<string, any>;
+    runningMap.clear();
+    const broadcasts = () => emitted.filter((entry) => entry.channel === "suba:activity");
+
+    try {
+      // Baseline: consumers need an explicit zero, not silence.
+      testApi.publishSubagentActivity(api, true);
+      assert.deepEqual(broadcasts().map((entry) => entry.data), [
+        { activeCount: 0, waitingCount: 0 },
+      ]);
+
+      const now = Date.now();
+      runningMap.set("a1", makeRunning("a1", waitingState(now)));
+      runningMap.set("b2", makeRunning("b2", activeState(now)));
+
+      // Emitted on change, counting only the blocked child as waiting.
+      testApi.publishSubagentActivity(api);
+      assert.deepEqual(broadcasts().at(-1)!.data, { activeCount: 2, waitingCount: 1 });
+
+      // Unchanged counts are not re-broadcast.
+      testApi.publishSubagentActivity(api);
+      assert.equal(broadcasts().length, 2);
+
+      // A late subscriber asking for the current value gets it despite no change.
+      fireEvent("suba:activity:request", {});
+      assert.deepEqual(broadcasts().at(-1)!.data, { activeCount: 2, waitingCount: 1 });
+      assert.equal(broadcasts().length, 3);
+
+      // Children finishing must publish zero, or a consumer stays "working".
+      runningMap.clear();
+      testApi.publishSubagentActivity(api);
+      assert.deepEqual(broadcasts().at(-1)!.data, { activeCount: 0, waitingCount: 0 });
+
+      // Request handler answers with the live map, not a cached count.
+      runningMap.set("c3", makeRunning("c3", waitingState(Date.now())));
+      fireEvent("suba:activity:request", {});
+      assert.deepEqual(broadcasts().at(-1)!.data, { activeCount: 1, waitingCount: 1 });
+    } finally {
+      runningMap.clear();
+    }
   });
 });

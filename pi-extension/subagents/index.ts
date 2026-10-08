@@ -2,6 +2,7 @@ import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-age
 import { keyHint } from "@mariozechner/pi-coding-agent";
 import { Type, type Static } from "@sinclair/typebox";
 import { Box, Text, truncateToWidth, visibleWidth } from "@mariozechner/pi-tui";
+import { execFileSync } from "node:child_process";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
@@ -110,6 +111,16 @@ const SubagentParams = Type.Object({
     Type.String({
       description:
         "Working directory for the sub-agent. The agent starts in this folder and picks up its local .pi/ config, CLAUDE.md, skills, and extensions. Use for role-specific subfolders.",
+    }),
+  ),
+  worktree: Type.Optional(
+    Type.Boolean({
+      description:
+        "Run the sub-agent in a fresh git worktree instead of the current checkout. " +
+        "OFF by default — set it only when the user explicitly asks to run a subagent in a separate worktree. " +
+        "The worktree (branch + handle) is created with `workmux add <name> --headless --json`; `cwd` (or the caller's " +
+        "directory) selects the repository. The sub-agent still gets its own pane, in that worktree. " +
+        "The worktree is left in place after the sub-agent exits, for review or `workmux merge <name>`.",
     }),
   ),
 });
@@ -346,6 +357,50 @@ function resolveSubagentPaths(
   const effectiveAgentDir =
     localAgentDir && existsSync(localAgentDir) ? localAgentDir : getAgentConfigDir();
   return { effectiveCwd, localAgentDir, effectiveAgentDir };
+}
+
+/** Slugify a subagent name into a workmux handle / branch name. */
+function subagentWorktreeHandle(name: string): string {
+  return name
+    .toLowerCase()
+    .replace(/[^a-z0-9\s-]/g, "")
+    .replace(/\s+/g, "-")
+    .replace(/-+/g, "-")
+    .replace(/^-|-$/g, "");
+}
+
+/**
+ * Create a git worktree for an opt-in subagent spawn and return its path.
+ *
+ * `--headless` creates the worktree + branch WITHOUT a tmux window or agent,
+ * so the subagent's own pane can be started inside it. Only called when a
+ * spawn sets `worktree: true`.
+ */
+function createSubagentWorktree(name: string, repoDir: string): string {
+  const handle = subagentWorktreeHandle(name) || `subagent-${Date.now()}`;
+  let stdout: string;
+  try {
+    stdout = execFileSync("workmux", ["add", handle, "--headless", "--json"], {
+      cwd: repoDir,
+      encoding: "utf8",
+    });
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    throw new Error(
+      `worktree: true, but \`workmux add ${handle} --headless --json\` failed in ${repoDir}. ` +
+        `Is workmux installed and ${repoDir} a git repository? ${detail}`,
+    );
+  }
+  let worktreePath: unknown;
+  try {
+    worktreePath = JSON.parse(stdout)?.worktree_path;
+  } catch {
+    worktreePath = undefined;
+  }
+  if (typeof worktreePath !== "string" || !worktreePath) {
+    throw new Error(`workmux add returned no worktree_path in ${repoDir}: ${stdout.trim()}`);
+  }
+  return worktreePath;
 }
 
 function getDefaultSessionDirFor(cwd: string, agentDir: string): string {
@@ -653,6 +708,9 @@ let widgetInterval: ReturnType<typeof setInterval> | null = null;
 /** Interval timer for status transition checks. */
 let statusInterval: ReturnType<typeof setInterval> | null = null;
 
+/** Last subagent counts published on the extension event bus. */
+let lastActivityCounts: { activeCount: number; waitingCount: number } | undefined;
+
 function formatElapsedMMSS(startTime: number): string {
   const seconds = Math.floor((Date.now() - startTime) / 1000);
   const m = Math.floor(seconds / 60);
@@ -744,6 +802,35 @@ function renderSubagentWidgetLines(agents: RunningSubagent[], width: number): st
 
   lines.push(borderBottom(width));
   return lines;
+}
+
+function countWaitingSubagents(): number {
+  let waiting = 0;
+  for (const running of runningSubagents.values()) {
+    // Only a child blocked on input. classifyStatus also reports phase "done"
+    // as waiting, which flashes a waiting window status for the tick between
+    // an auto-exit child's final activity write and its process exit.
+    if (running.statusState.phase === "waiting") waiting++;
+  }
+  return waiting;
+}
+
+/**
+ * Publish subagent counts on the extension event bus so integrations (the
+ * workmux window status) can mirror them. Emits only on change unless `force`
+ * is set, which re-emits unchanged counts for a late subscriber that asks.
+ */
+function publishSubagentActivity(pi: ExtensionAPI, force = false) {
+  const counts = { activeCount: runningSubagents.size, waitingCount: countWaitingSubagents() };
+  if (
+    !force &&
+    lastActivityCounts?.activeCount === counts.activeCount &&
+    lastActivityCounts.waitingCount === counts.waitingCount
+  ) {
+    return;
+  }
+  lastActivityCounts = counts;
+  pi.events.emit("suba:activity", counts);
 }
 
 function updateWidget() {
@@ -838,8 +925,13 @@ function applySandboxToParts(
   opts: { artifactDir: string; name: string },
 ): void {
   if (loadout.model) {
-    const model = loadout.thinking ? `${loadout.model}:${loadout.thinking}` : loadout.model;
-    parts.push("--model", shellEscape(model));
+    parts.push("--model", shellEscape(loadout.model));
+  }
+
+  // Applied independently of --model: an agent .md may set `thinking` without
+  // `model`, and the `model:level` suffix is silently ignored in that case.
+  if (loadout.thinking) {
+    parts.push("--thinking", shellEscape(loadout.thinking));
   }
 
   if (loadout.identity) {
@@ -1063,6 +1155,9 @@ function startStatusRefresh(pi: ExtensionAPI) {
 
   statusInterval = setInterval(() => {
     if (runningSubagents.size === 0) {
+      // Publish the drop to zero, or a consumer keeps reporting the last
+      // non-zero count as "working" forever.
+      publishSubagentActivity(pi);
       if (statusInterval) {
         clearInterval(statusInterval);
         statusInterval = null;
@@ -1094,6 +1189,8 @@ function startStatusRefresh(pi: ExtensionAPI) {
 
     if (shouldRefreshWidget) updateWidget();
 
+    publishSubagentActivity(pi);
+
     if (transitionLines.length > 0) {
       const capped = capStatusLines(transitionLines, statusConfig.lineLimit);
       pi.sendMessage(
@@ -1122,6 +1219,8 @@ function resolveResumeLaunchBehavior(): { autoExit: boolean; interactive: boolea
 export const __test__ = {
   borderLine,
   getShellReadyDelayMs,
+  subagentWorktreeHandle,
+  createSubagentWorktree,
   renderSubagentWidgetLines,
   loadAgentDefaults,
   discoverAgentDefinitions,
@@ -1133,6 +1232,8 @@ export const __test__ = {
   buildPiPromptArgs,
   formatWidgetRightLabel,
   observeRunningSubagent,
+  countWaitingSubagents,
+  publishSubagentActivity,
   getToolExtensionPath,
   resolveRunningByName,
   uniqueRunningName,
@@ -1185,7 +1286,18 @@ async function launchSubagent(
   const sessionId = ctx.sessionManager.getSessionId();
   const artifactDir = getArtifactDir(ctx.sessionManager.getSessionDir(), sessionId);
 
-  const { effectiveCwd, localAgentDir, effectiveAgentDir } = resolveSubagentPaths(params, agentDefs);
+  // Opt-in worktree isolation (default off): create the worktree first, then
+  // resolve paths against it so the child's cwd, project-local .pi/ config, and
+  // session dir all point at the new checkout. Resolved before any pane exists
+  // so a workmux failure aborts the spawn cleanly.
+  const repoDir = params.cwd ? resolve(process.cwd(), params.cwd) : ctx.cwd;
+  const worktreeCwd = params.worktree
+    ? createSubagentWorktree(params.name ?? params.agent, repoDir)
+    : null;
+  const { effectiveCwd, localAgentDir, effectiveAgentDir } = resolveSubagentPaths(
+    worktreeCwd ? { ...params, cwd: worktreeCwd } : params,
+    agentDefs,
+  );
   const targetCwdForSession = effectiveCwd ?? ctx.cwd;
   const sessionDir = getDefaultSessionDirFor(targetCwdForSession, effectiveAgentDir);
 
@@ -1642,6 +1754,9 @@ async function watchSubagent(
 
 export default function subagentsExtension(pi: ExtensionAPI) {
   latestPi = pi;
+  // A consumer of subagent activity (the workmux window status) can subscribe
+  // after children are already running: answer with the current counts.
+  pi.events.on("suba:activity:request", () => publishSubagentActivity(pi, true));
   // Capture the UI context for widget updates
   pi.on("session_start", (_event, ctx) => {
     latestCtx = ctx;
@@ -2321,11 +2436,16 @@ export default function subagentsExtension(pi: ExtensionAPI) {
 
   // /subagent command — spawn a subagent by name
   pi.registerCommand("subagent", {
-    description: "Spawn a subagent: /subagent <agent> <task>",
+    description: "Spawn a subagent: /subagent [--worktree] <agent> <task>",
     handler: async (args, ctx) => {
-      const trimmed = args.trim();
+      let trimmed = args.trim();
+      let worktree = false;
+      if (trimmed === "--worktree" || trimmed.startsWith("--worktree ")) {
+        worktree = true;
+        trimmed = trimmed.slice("--worktree".length).trim();
+      }
       if (!trimmed) {
-        ctx.ui.notify("Usage: /subagent <agent> [task]", "warning");
+        ctx.ui.notify("Usage: /subagent [--worktree] <agent> [task]", "warning");
         return;
       }
 
@@ -2344,7 +2464,9 @@ export default function subagentsExtension(pi: ExtensionAPI) {
 
       const taskText = task || `You are the ${agentName} agent. Wait for instructions.`;
       const displayName = agentName[0].toUpperCase() + agentName.slice(1);
-      const toolCall = `Use subagent with agent: "${agentName}", name: "${displayName}", task: ${JSON.stringify(taskText)}`;
+      const toolCall =
+        `Use subagent with agent: "${agentName}", name: "${displayName}", task: ${JSON.stringify(taskText)}` +
+        (worktree ? ", worktree: true" : "");
       pi.sendUserMessage(toolCall);
     },
   });

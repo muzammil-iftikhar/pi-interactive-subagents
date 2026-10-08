@@ -34,7 +34,27 @@ export PI_SUBAGENT_SHELL_READY_DELAY_MS=2500   # default: 500
 | `subagents_list` | List available agent definitions |
 | `ask_question` | *(sub-agent sessions only)* Ask the orchestrator a question and wait for the reply |
 
-There is also a `/subagent <agent> <task>` command for spawning directly.
+There is also a `/subagent <agent> <task>` command for spawning directly, and `/subagent --worktree <agent> <task>` to opt into a worktree.
+
+### Worktrees
+
+By default a sub-agent runs in the caller's checkout. Pass `worktree: true` to
+run it in its own git worktree instead — an isolated branch in a sibling
+directory, still in its own pane:
+
+```typescript
+subagent({ agent: "worker", name: "fix-auth", task: "Fix the auth flow", worktree: true });
+```
+
+The worktree is created with `workmux add <name> --headless --json` (worktree +
+branch, no extra tmux window or agent). `name` becomes the branch/handle; `cwd`
+(or the caller's directory) selects the repository. The worktree is **left in
+place** after the sub-agent exits so you can review it and `workmux merge <name>`
+— it is never auto-removed. Resume (`subagent_message`) reopens in the same
+worktree.
+
+This is opt-in: a normal spawn is untouched. Requires `workmux` on `PATH` and a
+git repository as the spawn directory.
 
 ### Spawning
 
@@ -50,6 +70,7 @@ subagent({ agent: "worker", name: "dark-mode", task: "Implement the dark mode to
 | `name` | string | agent name | Display name for the pane and widget. Must be unique — duplicates are auto-suffixed (`scout`, `scout-2`, …) |
 | `model` | string | agent's model | Override the model for this spawn |
 | `cwd` | string | agent's `cwd` | Working directory (see [Role folders](#role-folders)) |
+| `worktree` | boolean | `false` | Run in a fresh git worktree created with `workmux` (see [Worktrees](#worktrees)) |
 
 ### Messaging
 
