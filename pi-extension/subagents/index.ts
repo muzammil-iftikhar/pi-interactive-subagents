@@ -175,6 +175,9 @@ const SPAWNING_TOOLS = [
 /** Built-in tools pi provides natively — no extension needs to be loaded. */
 const BUILTIN_TOOLS = new Set(["read", "write", "edit", "bash", "grep", "find", "ls"]);
 
+/** Built-in pi extension carrying every MCP server's tools. */
+const MCP_BUILTIN_PATH = "builtin:mcp";
+
 /** Resolve the global agent config directory, respecting PI_CODING_AGENT_DIR. */
 function getAgentConfigDir(): string {
   return process.env.PI_CODING_AGENT_DIR ?? join(homedir(), ".pi", "agent");
@@ -214,6 +217,42 @@ export function registerToolExtension(name: string, extensionPath: string): void
   registerToolExtension,
 };
 
+// ── Live tool → extension index ─────────────────────────────────────────────
+// Which extension provides a tool is not knowable ahead of time: web tools come
+// from an npm package, `codemode`/`tool_search` are built-ins, MCP tools come
+// from `builtin:mcp`. A hardcoded path map silently drops everything it does
+// not name, leaving the tool in the `--tools` allowlist with no provider loaded.
+// pi's registry reports each tool's real location as `sourceInfo.path`.
+const LIVE_TOOL_EXTENSIONS = new Map<string, string>();
+
+/** Index tool names against their backer. Exported for tests. */
+export function indexToolExtensions(
+  tools: { name: string; sourceInfo?: { path?: string } }[],
+): void {
+  LIVE_TOOL_EXTENSIONS.clear();
+  for (const tool of tools) {
+    const path = tool.sourceInfo?.path;
+    if (path) LIVE_TOOL_EXTENSIONS.set(tool.name, path);
+  }
+}
+
+/** Snapshot the live registry. Runs on `session_start`, after every extension has loaded. */
+function refreshToolExtensionMap(pi: ExtensionAPI): void {
+  try {
+    indexToolExtensions(pi.getAllTools());
+  } catch {
+    // Older pi without getAllTools: the static fallback map still applies.
+  }
+}
+
+/**
+ * Synthetic paths (`builtin:codemode`, `<inline:x>`) name no file on disk, so
+ * only real paths are checked for existence.
+ */
+function isLoadableExtensionPath(path: string): boolean {
+  return path.startsWith("builtin:") || path.startsWith("<") || existsSync(path);
+}
+
 /**
  * Map a custom (non-built-in) tool name to the pi-extension file that
  * registers it. Used to build the child's `--extension` whitelist after
@@ -226,6 +265,10 @@ function getToolExtensionPath(tool: string): string | undefined {
   if ((SPAWNING_TOOLS as readonly string[]).includes(tool)) {
     return fileURLToPath(import.meta.url);
   }
+  // Live registry first: package extensions, `builtin:codemode`, and MCP
+  // servers all report through it, and their paths differ per installation.
+  const live = LIVE_TOOL_EXTENSIONS.get(tool);
+  if (live) return live;
   const extBase = join(getAgentConfigDir(), "extensions");
   const map: Record<string, string> = {
     web_search: join(extBase, "web-search", "index.ts"),
@@ -958,8 +1001,12 @@ function applySandboxToParts(
 
     const extPaths = new Set<string>();
     for (const tool of loadout.toolAllowlist.split(",")) {
-      const extPath = getToolExtensionPath(tool);
-      if (extPath && existsSync(extPath)) extPaths.add(extPath);
+      const name = tool.trim();
+      // MCP tools cannot name their own backer: a server registers its tools
+      // only after it connects, so they are absent from the registry at launch.
+      if (name.startsWith("mcp__")) extPaths.add(MCP_BUILTIN_PATH);
+      const extPath = getToolExtensionPath(name);
+      if (extPath && isLoadableExtensionPath(extPath)) extPaths.add(extPath);
     }
     for (const extPath of extPaths) {
       parts.push("-e", shellEscape(extPath));
@@ -1235,6 +1282,7 @@ export const __test__ = {
   countWaitingSubagents,
   publishSubagentActivity,
   getToolExtensionPath,
+  indexToolExtensions,
   resolveRunningByName,
   uniqueRunningName,
   reservedNames,
@@ -1760,6 +1808,9 @@ export default function subagentsExtension(pi: ExtensionAPI) {
   // Capture the UI context for widget updates
   pi.on("session_start", (_event, ctx) => {
     latestCtx = ctx;
+    // Every extension has loaded by now, so this is the first complete view of
+    // which tool comes from where.
+    refreshToolExtensionMap(pi);
     // pi runs multiple sessions in one process. A prior session's shutdown
     // aborts the shared module poll-abort controller; install a fresh one so
     // subagents spawned in this session aren't watched against a dead signal.

@@ -1222,13 +1222,58 @@ describe("subagent discovery", () => {
     }
   });
 
-  it("getToolExtensionPath maps custom tools and skips built-ins", () => {
+  it("getToolExtensionPath resolves tools through pi's live registry", () => {
     assert.equal(testApi.getToolExtensionPath("read"), undefined);
     assert.equal(testApi.getToolExtensionPath("bash"), undefined);
-    assert.ok(testApi.getToolExtensionPath("web_search")?.endsWith("web-search/index.ts"));
+    // Package-backed and built-in tools report their real location, which
+    // differs per installation (npm package dir, builtin:codemode).
+    testApi.indexToolExtensions([
+      { name: "web_search", sourceInfo: { path: "/opt/npm/pi-web-access/dist/index.js" } },
+      { name: "codemode", sourceInfo: { path: "builtin:codemode" } },
+    ]);
+    assert.equal(testApi.getToolExtensionPath("web_search"), "/opt/npm/pi-web-access/dist/index.js");
+    assert.equal(testApi.getToolExtensionPath("codemode"), "builtin:codemode");
+    // Unknown names resolve to nothing rather than a guessed path.
+    assert.equal(testApi.getToolExtensionPath("not_a_tool"), undefined);
     assert.ok(testApi.getToolExtensionPath("safe_bash")?.endsWith("tools/safe-bash.ts"));
     // Spawning tools are registered by this extension itself.
     assert.ok(testApi.getToolExtensionPath("subagent")?.endsWith("index.ts"));
+    testApi.indexToolExtensions([]);
+  });
+
+  it("applySandboxToParts loads builtin:mcp for mcp__ entries and builtin: paths as-is", () => {
+    withTempDir((d) => {
+      testApi.indexToolExtensions([{ name: "codemode", sourceInfo: { path: "builtin:codemode" } }]);
+      const parts: string[] = [];
+      testApi.applySandboxToParts(
+        parts,
+        {
+          agent: "researcher",
+          toolAllowlist: "bash,safe_bash,codemode,mcp__context7__*",
+          model: null,
+          thinking: null,
+          systemPromptMode: null,
+          identity: null,
+          spawnable: null,
+          autoExit: true,
+          cwd: null,
+          agentDir: null,
+        },
+        { artifactDir: d, name: "researcher" },
+      );
+      const loaded = new Set(
+        parts.filter((p, i) => parts[i - 1] === "-e").map((p) => p.replaceAll("'", "")),
+      );
+      // A codemode-exposure MCP tool needs both loaders: the server's tools come
+      // from builtin:mcp, and the script that calls them from builtin:codemode.
+      assert.ok(loaded.has("builtin:mcp"), "expected builtin:mcp for mcp__ entries");
+      assert.ok(loaded.has("builtin:codemode"), "expected the synthetic builtin: path to survive");
+      assert.ok(
+        [...loaded].some((p) => p.endsWith("tools/safe-bash.ts")),
+        "expected on-disk extension paths to still be loaded",
+      );
+      testApi.indexToolExtensions([]);
+    });
   });
 
   it("ignores invalid session-mode values", async () => {
