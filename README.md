@@ -99,7 +99,7 @@ If the reply arrives while the sub-agent is still mid-turn, it is absorbed into 
 | ----- | ----- | ----- | ---- |
 | **scout** | `openrouter/z-ai/glm-5.3` | `read`, `grep`, `find`, `ls`, `safe_bash` | Fast read-only codebase recon |
 | **researcher** | `openrouter/z-ai/glm-5.3` | `web_search`, `fetch_content`, `get_search_content`, `codemode`, `mcp__context7__*`, `safe_bash` | Web research, synthesized into a sourced brief |
-| **worker** | `openrouter/z-ai/glm-5.3` | `read`, `write`, `edit`, `bash`, `web_search`, `web_fetch` + spawning | General implementer; may spawn `scout` and `researcher` |
+| **worker** | `openrouter/z-ai/glm-5.3` | `read`, `write`, `edit`, `bash`, `web_search`, `fetch_content`, `codemode`, `mcp__*` + spawning | General implementer; may spawn `scout` and `researcher` |
 
 All three are autonomous (`auto-exit: true`) and carry their identity in the system prompt (`system-prompt: append`).
 

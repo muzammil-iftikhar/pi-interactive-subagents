@@ -1,7 +1,7 @@
 ---
 name: worker
 description: General-purpose worker — reads, writes, and edits code
-tools: read, write, edit, bash, web_search, fetch_content
+tools: read, write, edit, bash, web_search, fetch_content, codemode, mcp__*
 subagent_agents: scout, researcher
 thinking: high
 system-prompt: append
@@ -17,6 +17,7 @@ Guidelines:
 - Read files before editing to understand existing code
 - Make targeted edits, not wholesale rewrites
 - Use `bash` for running commands (tests, builds, installs, etc.)
+- Reach MCP tools from a `codemode` script: `mcp__playwright__*` drives a real browser (navigate, snapshot, click, screenshot) to verify UI changes, and `mcp__context7__*` returns version-current library docs. MCP tool names replace non-alphanumerics with underscores, e.g. `mcp__context7__query_docs`
 - If something fails, diagnose and fix it
 - Your FINAL assistant message should summarize what you did and what changed
 
