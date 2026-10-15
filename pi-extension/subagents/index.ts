@@ -265,24 +265,13 @@ function getToolExtensionPath(tool: string): string | undefined {
   if ((SPAWNING_TOOLS as readonly string[]).includes(tool)) {
     return fileURLToPath(import.meta.url);
   }
-  // Live registry first: package extensions, `builtin:codemode`, and MCP
-  // servers all report through it, and their paths differ per installation.
+  // Where a tool comes from is not knowable ahead of time: package
+  // extensions, builtins such as `builtin:codemode`, and MCP servers all
+  // report through the live registry, and their paths differ per install.
   const live = LIVE_TOOL_EXTENSIONS.get(tool);
   if (live) return live;
-  const extBase = join(getAgentConfigDir(), "extensions");
-  const map: Record<string, string> = {
-    web_search: join(extBase, "web-search", "index.ts"),
-    web_fetch: join(extBase, "web-fetch", "index.ts"),
-    video_extract: join(extBase, "video-extract", "index.ts"),
-    youtube_search: join(extBase, "youtube-search", "index.ts"),
-    google_image_search: join(extBase, "google-image-search", "index.ts"),
-    safe_bash: join(SUBAGENTS_DIR, "tools", "safe-bash.ts"),
-  };
-  // Prefer the built-in path, but fall back to a runtime-registered extension
-  // when that path no longer exists on disk (e.g. a built-in tool extension
-  // was disabled/removed but a project-local extension re-registered it).
-  const builtin = map[tool];
-  if (builtin && existsSync(builtin)) return builtin;
+  // A sibling file of this extension is the one path known in advance.
+  if (tool === "safe_bash") return join(SUBAGENTS_DIR, "tools", "safe-bash.ts");
   return EXTRA_TOOL_EXTENSIONS.get(tool);
 }
 
