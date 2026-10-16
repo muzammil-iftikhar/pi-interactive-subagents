@@ -1984,7 +1984,7 @@ describe("tool registration", () => {
     );
   });
 
-  it("slugs subagent names into workmux handles", () => {
+  it("slugs subagent names into worktree handles", () => {
     const { api } = createMockExtensionApi();
     (subagentsModule as any).default(api);
 

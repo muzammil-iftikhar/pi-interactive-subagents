@@ -3,10 +3,10 @@
  *
  * Verifies the `worktree: true` path end to end — the parent pi calls the
  * `subagent` tool with `worktree: true`, the extension creates a git worktree
- * via `workmux add --headless --json`, and the subagent runs inside that
- * worktree (its own branch), not the caller's checkout.
+ * via `wt switch --create`, and the subagent runs inside that worktree (its own
+ * branch), not the caller's checkout.
  *
- * Requires tmux + workmux + git. Spawns REAL pi sessions (real LLM calls).
+ * Requires tmux + worktrunk (wt) + git. Spawns REAL pi sessions (real LLM calls).
  *
  * Run inside tmux:
  *   PI_TEST_MODEL=<your-model> node --test test/integration/worktree-spawn.test.ts
@@ -32,22 +32,22 @@ import {
 } from "./harness.ts";
 
 const backends = getAvailableBackends();
-const hasWorkmux = (() => {
+const hasWt = (() => {
   try {
-    execFileSync("sh", ["-c", "command -v workmux"], { stdio: "ignore" });
+    execFileSync("sh", ["-c", "command -v wt"], { stdio: "ignore" });
     return true;
   } catch {
     return false;
   }
 })();
 
-if (backends.length === 0 || !hasWorkmux) {
+if (backends.length === 0 || !hasWt) {
   console.log(
-    `⚠️  Skipping worktree-spawn integration tests (tmux: ${backends.length > 0}, workmux: ${hasWorkmux})`,
+    `⚠️  Skipping worktree-spawn integration tests (tmux: ${backends.length > 0}, wt: ${hasWt})`,
   );
 }
 
-for (const backend of backends.length > 0 && hasWorkmux ? backends : []) {
+for (const backend of backends.length > 0 && hasWt ? backends : []) {
   describe(`worktree-spawn [${backend}]`, { timeout: PI_TIMEOUT * 3 }, () => {
     let env: TestEnv;
 
@@ -66,7 +66,7 @@ for (const backend of backends.length > 0 && hasWorkmux ? backends : []) {
       cleanupTestEnv(env);
     });
 
-    it("runs the subagent inside a workmux-created worktree", async () => {
+    it("runs the subagent inside a wt-created worktree", async () => {
       const id = uniqueId();
       const handle = `wt-${id}`;
       const markerFile = `/tmp/pi-integ-wt-${id}.txt`;
@@ -94,7 +94,7 @@ for (const backend of backends.length > 0 && hasWorkmux ? backends : []) {
       const [cwd, branch] = content.trim().split(/\s+/);
 
       assert.ok(
-        cwd.includes("__worktrees") && cwd.endsWith(handle),
+        cwd.endsWith(handle) && cwd !== env.dir,
         `subagent should run in a worktree dir ending with "${handle}", got cwd="${cwd}"`,
       );
       assert.equal(branch, handle, `subagent should be on branch "${handle}", got "${branch}"`);
@@ -105,9 +105,13 @@ for (const backend of backends.length > 0 && hasWorkmux ? backends : []) {
       // Clean up the worktree the spawn created (sibling of env.dir, so
       // cleanupTestEnv would not remove it).
       try {
-        execFileSync("workmux", ["remove", handle, "-f"], { cwd: env.dir, stdio: "ignore" });
+        execFileSync(
+          "wt",
+          ["-C", env.dir, "remove", handle, "--force", "--force-delete", "--yes"],
+          { stdio: "ignore" },
+        );
       } catch {}
-      rmSync(env.dir + "__worktrees", { recursive: true, force: true });
+      rmSync(`${env.dir}.${handle}`, { recursive: true, force: true });
     });
   });
 }

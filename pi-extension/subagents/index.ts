@@ -118,9 +118,10 @@ const SubagentParams = Type.Object({
       description:
         "Run the sub-agent in a fresh git worktree instead of the current checkout. " +
         "OFF by default — set it only when the user explicitly asks to run a subagent in a separate worktree. " +
-        "The worktree (branch + handle) is created with `workmux add <name> --headless --json`; `cwd` (or the caller's " +
-        "directory) selects the repository. The sub-agent still gets its own pane, in that worktree. " +
-        "The worktree is left in place after the sub-agent exits, for review or `workmux merge <name>`.",
+        "The worktree (branch + handle) is created with `wt switch --create` (worktrunk), branched from the " +
+        "repository's default branch; `cwd` (or the caller's directory) selects the repository. The sub-agent " +
+        "still gets its own pane, in that worktree. The worktree is left in place after the sub-agent exits, " +
+        "for review or `wt merge` run from inside it.",
     }),
   ),
 });
@@ -391,7 +392,7 @@ function resolveSubagentPaths(
   return { effectiveCwd, localAgentDir, effectiveAgentDir };
 }
 
-/** Slugify a subagent name into a workmux handle / branch name. */
+/** Slugify a subagent name into a worktree handle / branch name. */
 function subagentWorktreeHandle(name: string): string {
   return name
     .toLowerCase()
@@ -404,33 +405,32 @@ function subagentWorktreeHandle(name: string): string {
 /**
  * Create a git worktree for an opt-in subagent spawn and return its path.
  *
- * `--headless` creates the worktree + branch WITHOUT a tmux window or agent,
- * so the subagent's own pane can be started inside it. Only called when a
- * spawn sets `worktree: true`.
+ * `--no-cd` creates the worktree + branch WITHOUT shell integration, so the
+ * subagent's own pane can be started inside it. `--yes` stops a hook from a
+ * project `wt` config blocking on an approval prompt there is no terminal for.
+ * Only called when a spawn sets `worktree: true`.
  */
 function createSubagentWorktree(name: string, repoDir: string): string {
   const handle = subagentWorktreeHandle(name) || `subagent-${Date.now()}`;
+  const args = ["-C", repoDir, "switch", "--create", handle, "--no-cd", "--format=json", "--yes"];
   let stdout: string;
   try {
-    stdout = execFileSync("workmux", ["add", handle, "--headless", "--json"], {
-      cwd: repoDir,
-      encoding: "utf8",
-    });
+    stdout = execFileSync("wt", args, { encoding: "utf8" });
   } catch (error) {
     const detail = error instanceof Error ? error.message : String(error);
     throw new Error(
-      `worktree: true, but \`workmux add ${handle} --headless --json\` failed in ${repoDir}. ` +
-        `Is workmux installed and ${repoDir} a git repository? ${detail}`,
+      `worktree: true, but \`wt ${args.join(" ")}\` failed. ` +
+        `Is worktrunk (wt) installed and ${repoDir} a git repository? ${detail}`,
     );
   }
   let worktreePath: unknown;
   try {
-    worktreePath = JSON.parse(stdout)?.worktree_path;
+    worktreePath = JSON.parse(stdout)?.path;
   } catch {
     worktreePath = undefined;
   }
   if (typeof worktreePath !== "string" || !worktreePath) {
-    throw new Error(`workmux add returned no worktree_path in ${repoDir}: ${stdout.trim()}`);
+    throw new Error(`wt switch --create returned no path in ${repoDir}: ${stdout.trim()}`);
   }
   return worktreePath;
 }
@@ -848,8 +848,8 @@ function countWaitingSubagents(): number {
 }
 
 /**
- * Publish subagent counts on the extension event bus so integrations (the
- * workmux window status) can mirror them. Emits only on change unless `force`
+ * Publish subagent counts on the extension event bus so integrations (a tmux
+ * window-status extension) can mirror them. Emits only on change unless `force`
  * is set, which re-emits unchanged counts for a late subscriber that asks.
  */
 function publishSubagentActivity(pi: ExtensionAPI, force = false) {
@@ -1326,7 +1326,7 @@ async function launchSubagent(
   // Opt-in worktree isolation (default off): create the worktree first, then
   // resolve paths against it so the child's cwd, project-local .pi/ config, and
   // session dir all point at the new checkout. Resolved before any pane exists
-  // so a workmux failure aborts the spawn cleanly.
+  // so a wt failure aborts the spawn cleanly.
   const repoDir = params.cwd ? resolve(process.cwd(), params.cwd) : ctx.cwd;
   const worktreeCwd = params.worktree
     ? createSubagentWorktree(params.name ?? params.agent, repoDir)
@@ -1791,7 +1791,7 @@ async function watchSubagent(
 
 export default function subagentsExtension(pi: ExtensionAPI) {
   latestPi = pi;
-  // A consumer of subagent activity (the workmux window status) can subscribe
+  // A consumer of subagent activity (a tmux window-status extension) can subscribe
   // after children are already running: answer with the current counts.
   pi.events.on("suba:activity:request", () => publishSubagentActivity(pi, true));
   // Capture the UI context for widget updates
