@@ -264,7 +264,15 @@ export default function (pi: ExtensionAPI) {
       }
 
       recorder.agentEndDone();
-      ctx.shutdown();
+      // A shutdown that throws or never completes strands this process: the
+      // parent learns the child finished only when the shell wrapper echoes its
+      // done marker, and that needs this process to exit.
+      try {
+        void Promise.resolve(ctx.shutdown()).catch(() => process.exit(0));
+      } catch {
+        process.exit(0);
+      }
+      setTimeout(() => process.exit(0), 10_000).unref();
       return;
     }
 

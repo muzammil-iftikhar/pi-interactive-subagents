@@ -242,7 +242,7 @@ export function closeSurface(surface: string): void {
 
 export interface PollResult {
   /** How the subagent exited */
-  reason: "done" | "sentinel" | "error";
+  reason: "done" | "sentinel" | "error" | "hung";
   /** Shell exit code (from sentinel). 0 for file-based exits. */
   exitCode: number;
   /** Error message if reason is "error" (auto-retry exhausted, provider overload, etc.) */
@@ -283,6 +283,8 @@ export async function pollForExit(
     interval: number;
     sessionFile?: string;
     sentinelFile?: string;
+    /** True when the child reported itself finished but never exited. */
+    hungAfterDone?: () => boolean;
     onTick?: (elapsed: number) => void;
   },
 ): Promise<PollResult> {
@@ -303,6 +305,13 @@ export async function pollForExit(
           return interpretExitSidecar(data);
         }
       } catch {}
+    }
+
+    // Watchdog: a child that reported itself done but never exited leaves the
+    // shell wrapper waiting, so the done marker never reaches the screen and
+    // this loop would wait forever. Take the completed turn instead.
+    if (options.hungAfterDone?.()) {
+      return { reason: "hung", exitCode: 0 };
     }
 
     // Check Claude sentinel file (written by plugin Stop hook)

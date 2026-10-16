@@ -1,7 +1,7 @@
 import { describe, it, before, after, beforeEach } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, writeFileSync, readFileSync, mkdirSync, rmSync, existsSync } from "node:fs";
-import { join } from "node:path";
+import { mkdtempSync, writeFileSync, readFileSync, mkdirSync, rmSync, existsSync, utimesSync } from "node:fs";
+import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { visibleWidth } from "@earendil-works/pi-tui";
@@ -2235,6 +2235,34 @@ describe("subagent interruption", () => {
       ...overrides,
     };
   }
+
+  it("reaps an autonomous child whose shutdown hung, but leaves an interactive one alone", () => {
+    const { isHungAfterDone } = (subagentsModule as any).__test__;
+    const file = join(mkdtempSync(join(tmpdir(), "hung-child-")), "session.jsonl");
+    const turnEndingWith = (stopReason: string) =>
+      writeFileSync(file, `${JSON.stringify({ type: "message", message: { role: "assistant", stopReason, content: [] } })}\n`);
+    turnEndingWith("stop");
+    const longAgo = new Date(Date.now() - 60_000);
+    utimesSync(file, longAgo, longAgo); // finished its turn a minute ago and went quiet
+
+    const child = (over: Record<string, unknown> = {}) =>
+      makeRunning({ sessionFile: file, statusState: { phase: "done" }, ...over });
+
+    try {
+      assert.equal(isHungAfterDone(child()), true, "done + silent = hung shutdown");
+      assert.equal(isHungAfterDone(child({ interactive: true })), false, "user-driven child is left alone");
+      assert.equal(isHungAfterDone(child({ statusState: { phase: "active" } })), false, "still working");
+
+      writeFileSync(file, `${JSON.stringify({ type: "message", message: { role: "assistant", stopReason: "stop", content: [] } })}\n{}\n`);
+      assert.equal(isHungAfterDone(child()), false, "recent activity is not a hang");
+
+      turnEndingWith("aborted");
+      utimesSync(file, longAgo, longAgo);
+      assert.equal(isHungAfterDone(child()), false, "an aborted turn is left open for inspection");
+    } finally {
+      rmSync(dirname(file), { recursive: true, force: true });
+    }
+  });
 
   it("registers subagent_message and not the old interrupt/resume tools", () => {
     const { api, registeredTools } = createMockExtensionApi();

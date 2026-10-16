@@ -13,6 +13,7 @@ import {
   mkdirSync,
   copyFileSync,
   unlinkSync,
+  statSync,
 } from "node:fs";
 import { homedir } from "node:os";
 import {
@@ -1282,6 +1283,7 @@ export const __test__ = {
   formatWidgetRightLabel,
   observeRunningSubagent,
   countWaitingSubagents,
+  isHungAfterDone,
   publishSubagentActivity,
   getToolExtensionPath,
   indexToolExtensions,
@@ -1683,6 +1685,48 @@ function deliverPendingQuestion(running: RunningSubagent): void {
   );
 }
 
+/**
+ * How long a child that reported "done" may stay silent before its shutdown is
+ * assumed hung. The wrapper echoes the done marker only once the child exits, so
+ * a child that finished its turn and never exits strands the parent's watcher.
+ */
+const HUNG_CHILD_MS = 20_000;
+
+/**
+ * Mirrors the child's own auto-exit rule: only a cleanly finished turn counts.
+ * An aborted turn is deliberately left open for inspection, so it must not be
+ * mistaken for a hung shutdown.
+ */
+function lastTurnCompleted(sessionFile: string): boolean {
+  try {
+    const entries = getNewEntries(sessionFile, 0) as any[];
+    for (let i = entries.length - 1; i >= 0; i--) {
+      const entry = entries[i];
+      if (entry?.type !== "message" || entry.message?.role !== "assistant") continue;
+      return entry.message.stopReason !== "aborted";
+    }
+  } catch {
+    // unreadable or partway-written session file
+  }
+  return false;
+}
+
+/**
+ * True when an autonomous child reported phase "done" and then went quiet — its
+ * exit path hung, so waiting for the done marker would never end. Interactive
+ * children are excluded: they idle between user messages on purpose.
+ */
+function isHungAfterDone(running: RunningSubagent): boolean {
+  if (running.interactive) return false;
+  if (running.statusState?.phase !== "done") return false;
+  try {
+    if (Date.now() - statSync(running.sessionFile).mtimeMs <= HUNG_CHILD_MS) return false;
+  } catch {
+    return false;
+  }
+  return lastTurnCompleted(running.sessionFile);
+}
+
 async function watchSubagent(
   running: RunningSubagent,
   signal: AbortSignal,
@@ -1694,6 +1738,7 @@ async function watchSubagent(
       interval: 1000,
       sessionFile,
       sentinelFile: running.sentinelFile,
+      hungAfterDone: () => isHungAfterDone(running),
       onTick() {
         observeRunningSubagent(running);
         deliverPendingQuestion(running);
