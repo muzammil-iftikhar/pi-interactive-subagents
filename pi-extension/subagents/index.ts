@@ -119,9 +119,9 @@ const SubagentParams = Type.Object({
         "Run the sub-agent in a fresh git worktree instead of the current checkout. " +
         "OFF by default — set it only when the user explicitly asks to run a subagent in a separate worktree. " +
         "The worktree (branch + handle) is created with `wt switch --create` (worktrunk), branched from the " +
-        "repository's default branch; `cwd` (or the caller's directory) selects the repository. The sub-agent " +
-        "still gets its own pane, in that worktree. The worktree is left in place after the sub-agent exits, " +
-        "for review or `wt merge` run from inside it.",
+        "current branch of the spawn directory; `cwd` (or the caller's directory) selects the repository. The " +
+        "sub-agent still gets its own pane, in that worktree. The worktree is left in place after the sub-agent " +
+        "exits, for review or `wt merge` run from inside it.",
     }),
   ),
 });
@@ -405,14 +405,27 @@ function subagentWorktreeHandle(name: string): string {
 /**
  * Create a git worktree for an opt-in subagent spawn and return its path.
  *
- * `--no-cd` creates the worktree + branch WITHOUT shell integration, so the
- * subagent's own pane can be started inside it. `--yes` stops a hook from a
- * project `wt` config blocking on an approval prompt there is no terminal for.
- * Only called when a spawn sets `worktree: true`.
+ * `-b @` bases the new branch on the spawn directory's current branch, so the
+ * subagent starts from the caller's in-progress code. `--no-cd` creates the
+ * worktree + branch WITHOUT shell integration, so the subagent's own pane can be
+ * started inside it. `--yes` stops a hook from a project `wt` config blocking on
+ * an approval prompt there is no terminal for. Only called when a spawn sets
+ * `worktree: true`.
  */
 function createSubagentWorktree(name: string, repoDir: string): string {
   const handle = subagentWorktreeHandle(name) || `subagent-${Date.now()}`;
-  const args = ["-C", repoDir, "switch", "--create", handle, "--no-cd", "--format=json", "--yes"];
+  const args = [
+    "-C",
+    repoDir,
+    "switch",
+    "--create",
+    handle,
+    "-b",
+    "@",
+    "--no-cd",
+    "--format=json",
+    "--yes",
+  ];
   let stdout: string;
   try {
     stdout = execFileSync("wt", args, { encoding: "utf8" });

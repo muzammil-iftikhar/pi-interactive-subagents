@@ -46,12 +46,12 @@ directory, still in its own pane:
 subagent({ agent: "worker", name: "fix-auth", task: "Fix the auth flow", worktree: true });
 ```
 
-The worktree is created with `wt -C <repo> switch --create <name> --no-cd
---format=json --yes` (worktree + branch off the repository's default branch, no
-extra tmux window or agent). `name` becomes the branch/handle; `cwd` (or the
-caller's directory) selects the repository. The worktree is **left in place**
-after the sub-agent exits so you can review it and `wt merge` from inside it —
-it is never auto-removed. Resume (`subagent_message`) reopens in the same
+The worktree is created with `wt -C <repo> switch --create <name> -b @ --no-cd
+--format=json --yes` (worktree + branch off the spawn directory's current
+branch, no extra tmux window or agent). `name` becomes the branch/handle; `cwd`
+(or the caller's directory) selects the repository. The worktree is **left in
+place** after the sub-agent exits so you can review it and `wt merge` from inside
+it — it is never auto-removed. Resume (`subagent_message`) reopens in the same
 worktree.
 
 This is opt-in: a normal spawn is untouched. Requires worktrunk (`wt`) on `PATH`
