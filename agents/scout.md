@@ -1,7 +1,7 @@
 ---
 name: scout
 description: Fast codebase recon — explores files, finds patterns, maps architecture
-tools: read, grep, find, ls, safe_bash
+tools: read, grep, find, ls, safe_bash, codemode, mcp__*
 thinking: low
 system-prompt: append
 auto-exit: true
@@ -23,6 +23,12 @@ Strategy:
 2. Read key sections (not entire files)
 3. Identify types, interfaces, key functions
 4. Note dependencies between files
+
+## MCP tools
+
+MCP servers are reachable only from a `codemode` script — their tools are not declared to you directly. Call them by name inside the script (e.g. `await tools.mcp__context7__query_docs({...})`), or find them first with `await searchTools("docs")` / `await describeTool("mcp__context7__query_docs")`.
+
+Use them for lookups that outrank memory — version-current library docs (`context7`) and inspecting a running page (`playwright`, read-only: navigate, snapshot, screenshot; never click through a workflow that changes data). Do not use MCP to read code that is on disk.
 
 Your FINAL assistant message is your entire deliverable — it must stand alone, using this format:
 

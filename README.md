@@ -98,7 +98,7 @@ If the reply arrives while the sub-agent is still mid-turn, it is absorbed into 
 
 | Agent | Tools | Role |
 | ----- | ----- | ---- |
-| **scout** | `read`, `grep`, `find`, `ls`, `safe_bash` | Fast read-only codebase recon |
+| **scout** | `read`, `grep`, `find`, `ls`, `safe_bash`, `codemode`, `mcp__*` | Fast read-only codebase recon |
 | **researcher** | `web_search`, `fetch_content`, `get_search_content`, `codemode`, `mcp__context7__*`, `safe_bash` | Web research, synthesized into a sourced brief |
 | **worker** | `read`, `write`, `edit`, `bash`, `web_search`, `fetch_content`, `codemode`, `mcp__*` + spawning | General implementer; may spawn `scout` and `researcher` |
 
