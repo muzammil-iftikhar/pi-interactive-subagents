@@ -266,6 +266,94 @@ export function createSurfaceSplit(
 }
 
 /**
+ * Herdr terminal names are 1-32 of a-z 0-9 - _ ; anything else is rejected.
+ */
+function hcName(name: string): string {
+  const slug = name
+    .toLowerCase()
+    .replace(/[^a-z0-9_-]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 32);
+  return slug || "subagent";
+}
+
+/** Wait until a terminal has a pane, asking herdr again while it settles. */
+function waitForPane(terminal: string, timeoutMs = 1500): void {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (resolvePane(terminal)) return;
+    try {
+      // `hc run --bg` reports the address before the core has registered the
+      // terminal, so the first keep can fail with "no running terminal".
+      herdrDo("terminal.keep", ["--terminal", terminal, "--place", "right"]);
+    } catch {
+      // Not registered yet; try again on the next turn of the loop.
+    }
+    try {
+      execFileSync("sleep", ["0.1"]);
+    } catch {
+      return;
+    }
+  }
+}
+
+/** One `hc` run, retrying without a name when that name is already taken. */
+function hcRun(address: { args: string[] }): string {
+  const parse = (out: string): string => {
+    try {
+      const reply = JSON.parse(out) as { address?: string };
+      return typeof reply.address === "string" ? reply.address : "";
+    } catch {
+      return "";
+    }
+  };
+
+  try {
+    return parse(execFileSync("hc", address.args, { encoding: "utf8" }));
+  } catch {
+    const args: string[] = [];
+    for (let i = 0; i < address.args.length; i += 1) {
+      if (address.args[i] === "--name") {
+        i += 1;
+        continue;
+      }
+      args.push(address.args[i]!);
+    }
+    return parse(execFileSync("hc", args, { encoding: "utf8" }));
+  }
+}
+
+/**
+ * Create a pane for a subagent that herdr files under the parent agent.
+ *
+ * Herdr only nests a child when its terminal records a parent, and only
+ * `hc run --parent` writes that link: a plain `pane.split` makes a
+ * free-standing terminal that herdr lists as another top-level agent. The
+ * terminal starts pane-less (herdr's own idea of a sub-agent), so
+ * `terminal.keep` gives it the pane beside pi.
+ */
+export function createNestedSurface(name: string, cwd?: string): string {
+  requireHerdr();
+
+  const args = ["run", "--bg", "--name", hcName(name)];
+  const parent = parentTerminal();
+  if (parent) args.push("--parent", parent);
+  if (cwd) args.push("--cwd", cwd);
+  args.push(process.env.SHELL?.trim() || "bash");
+
+  const terminal = hcRun({ args });
+  if (!terminal) {
+    throw new Error("hc run did not report a terminal address");
+  }
+
+  // Give it the pane beside pi; keep races terminal registration, so the retry
+  // lives inside waitForPane instead of being fired once here.
+  waitForPane(terminal);
+  evenPanes(terminal);
+  return terminal;
+}
+
+/**
  * Send a command string to a terminal and execute it.
  * `hc send` pastes the text and presses Enter, so literal strings are safe.
  */

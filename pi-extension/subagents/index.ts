@@ -21,6 +21,7 @@ import {
   muxName,
   muxSetupHint,
   createSurface,
+  createNestedSurface,
   sendCommand,
   sendLongCommand,
   pollForExit,
@@ -402,6 +403,19 @@ function subagentWorktreeHandle(name: string): string {
     .replace(/\s+/g, "-")
     .replace(/-+/g, "-")
     .replace(/^-|-$/g, "");
+}
+
+/**
+ * True when the directory is a linked git worktree (`git worktree add`) rather
+ * than the main checkout: those carry a `.git` file pointing at the real git
+ * dir, where a normal checkout has a `.git` directory.
+ */
+function isLinkedGitWorktree(dir: string): boolean {
+  try {
+    return statSync(join(dir, ".git")).isFile();
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -1368,8 +1382,17 @@ async function launchSubagent(
 
   // Use pre-created surface (parallel mode) or create a new one.
   // For new surfaces, pause briefly so the shell is ready before sending the command.
+  // A run in its own worktree is filed under the parent agent in herdr; a plain
+  // subagent keeps its own top-level entry, which is what a short helper should.
   const surfacePreCreated = !!options?.surface;
-  const surface = options?.surface ?? createSurface(params.name);
+  const nestUnderParent =
+    !!worktreeCwd ||
+    (!!effectiveCwd && effectiveCwd !== ctx.cwd && isLinkedGitWorktree(effectiveCwd));
+  const surface =
+    options?.surface ??
+    (nestUnderParent
+      ? createNestedSurface(params.name, effectiveCwd ?? undefined)
+      : createSurface(params.name));
   if (!surfacePreCreated) {
     await new Promise<void>((resolve) => setTimeout(resolve, getShellReadyDelayMs()));
   }
@@ -2363,7 +2386,11 @@ export default function subagentsExtension(pi: ExtensionAPI) {
         // transcript doesn't block the UI.
         const entryCountBefore = countSessionEntryLines(sessionPath);
 
-        const surface = createSurface(name);
+        const resumeCwd = loadout.cwd ?? undefined;
+        const surface =
+          resumeCwd && isLinkedGitWorktree(resumeCwd)
+            ? createNestedSurface(name, resumeCwd)
+            : createSurface(name);
         await new Promise<void>((resolve) => setTimeout(resolve, getShellReadyDelayMs()));
 
         // Build pi resume command

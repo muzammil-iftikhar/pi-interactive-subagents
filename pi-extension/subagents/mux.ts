@@ -53,6 +53,18 @@ export function createSurface(name: string): string {
   return backend().createSurface(name);
 }
 
+/**
+ * Create a surface herdr files under the parent agent, for runs that live in
+ * their own worktree. A plain pane split is enough for every other run: those
+ * show up as their own agent, which is what a short interactive helper should
+ * do. Backends without a parent concept fall back to a plain surface.
+ */
+export function createNestedSurface(name: string, cwd?: string): string {
+  return currentMux() === "herdr"
+    ? herdr.createNestedSurface(name, cwd)
+    : tmux.createSurface(name);
+}
+
 export function createSurfaceSplit(
   name: string,
   direction: "left" | "right" | "up" | "down",
