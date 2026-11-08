@@ -3,10 +3,10 @@
  *
  * Verifies the `worktree: true` path end to end — the parent pi calls the
  * `subagent` tool with `worktree: true`, the extension creates a git worktree
- * via `wt switch --create`, and the subagent runs inside that worktree (its own
- * branch), not the caller's checkout.
+ * with plain `git worktree add`, and the subagent runs inside that worktree
+ * (its own branch), not the caller's checkout.
  *
- * Requires tmux + worktrunk (wt) + git. Spawns REAL pi sessions (real LLM calls).
+ * Requires tmux + git. Spawns REAL pi sessions (real LLM calls).
  *
  * Run inside tmux:
  *   PI_TEST_MODEL=<your-model> node --test test/integration/worktree-spawn.test.ts
@@ -32,22 +32,12 @@ import {
 } from "./harness.ts";
 
 const backends = getAvailableBackends();
-const hasWt = (() => {
-  try {
-    execFileSync("sh", ["-c", "command -v wt"], { stdio: "ignore" });
-    return true;
-  } catch {
-    return false;
-  }
-})();
 
-if (backends.length === 0 || !hasWt) {
-  console.log(
-    `⚠️  Skipping worktree-spawn integration tests (tmux: ${backends.length > 0}, wt: ${hasWt})`,
-  );
+if (backends.length === 0) {
+  console.log("⚠️  Skipping worktree-spawn integration tests (no tmux backend)");
 }
 
-for (const backend of backends.length > 0 && hasWt ? backends : []) {
+for (const backend of backends) {
   describe(`worktree-spawn [${backend}]`, { timeout: PI_TIMEOUT * 3 }, () => {
     let env: TestEnv;
 
@@ -66,13 +56,13 @@ for (const backend of backends.length > 0 && hasWt ? backends : []) {
       cleanupTestEnv(env);
     });
 
-    it("runs the subagent inside a wt-created worktree", async () => {
+    it("runs the subagent inside a git worktree", async () => {
       const id = uniqueId();
-      const handle = `wt-${id}`;
-      const markerFile = `/tmp/pi-integ-wt-${id}.txt`;
+      const handle = `tree-${id}`;
+      const markerFile = `/tmp/pi-integ-tree-${id}.txt`;
       trackTempFile(env, markerFile);
 
-      const surface = createTrackedSurface(env, `wt-${id}`);
+      const surface = createTrackedSurface(env, `tree-${id}`);
       await sleep(1000);
 
       const task = [
@@ -100,16 +90,17 @@ for (const backend of backends.length > 0 && hasWt ? backends : []) {
       assert.equal(branch, handle, `subagent should be on branch "${handle}", got "${branch}"`);
       assert.ok(existsSync(cwd + "/README.md"), "worktree should contain the repo files");
 
-      await waitForScreen(surface, /INTEGRATION_WORKTREE_COMPLETE|Sub-agent.*"wt-/i, PI_TIMEOUT);
+      await waitForScreen(surface, /INTEGRATION_WORKTREE_COMPLETE|Sub-agent.*"tree-/i, PI_TIMEOUT);
 
       // Clean up the worktree the spawn created (sibling of env.dir, so
       // cleanupTestEnv would not remove it).
       try {
-        execFileSync(
-          "wt",
-          ["-C", env.dir, "remove", handle, "--force", "--force-delete", "--yes"],
-          { stdio: "ignore" },
-        );
+        execFileSync("git", ["-C", env.dir, "worktree", "remove", "--force", `${env.dir}.${handle}`], {
+          stdio: "ignore",
+        });
+      } catch {}
+      try {
+        execFileSync("git", ["-C", env.dir, "branch", "-D", handle], { stdio: "ignore" });
       } catch {}
       rmSync(`${env.dir}.${handle}`, { recursive: true, force: true });
     });

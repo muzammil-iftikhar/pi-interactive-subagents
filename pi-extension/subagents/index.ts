@@ -3,7 +3,7 @@ import { keyHint } from "@earendil-works/pi-coding-agent";
 import { Type, type Static } from "@sinclair/typebox";
 import { Box, Text, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { execFileSync } from "node:child_process";
-import { dirname, join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   readdirSync,
@@ -121,10 +121,10 @@ const SubagentParams = Type.Object({
       description:
         "Run the sub-agent in a fresh git worktree instead of the current checkout. " +
         "OFF by default — set it only when the user explicitly asks to run a subagent in a separate worktree. " +
-        "The worktree (branch + handle) is created with `wt switch --create` (worktrunk), branched from the " +
+        "The worktree (branch + handle) is created with `git worktree add`, branched from the " +
         "current branch of the spawn directory; `cwd` (or the caller's directory) selects the repository. The " +
         "sub-agent still gets its own pane, in that worktree. The worktree is left in place after the sub-agent " +
-        "exits, for review or `wt merge` run from inside it.",
+        "exits, for review; remove it with `git worktree remove`.",
     }),
   ),
 });
@@ -421,47 +421,50 @@ function isLinkedGitWorktree(dir: string): boolean {
 /**
  * Create a git worktree for an opt-in subagent spawn and return its path.
  *
- * `-b @` bases the new branch on the spawn directory's current branch, so the
- * subagent starts from the caller's in-progress code. `--no-cd` creates the
- * worktree + branch WITHOUT shell integration, so the subagent's own pane can be
- * started inside it. `--yes` stops a hook from a project `wt` config blocking on
- * an approval prompt there is no terminal for. Only called when a spawn sets
- * `worktree: true`.
+ * Plain `git worktree add`: the worktree sits beside the repository as
+ * `<repo>.<handle>` on a new branch named after the subagent, based on whatever
+ * the spawn directory has checked out, so the subagent starts from the caller's
+ * in-progress code. Only called when a spawn sets `worktree: true`.
  */
 function createSubagentWorktree(name: string, repoDir: string): string {
   const handle = subagentWorktreeHandle(name) || `subagent-${Date.now()}`;
-  const args = [
-    "-C",
-    repoDir,
-    "switch",
-    "--create",
-    handle,
-    "-b",
-    "@",
-    "--no-cd",
-    "--format=json",
-    "--yes",
-  ];
-  let stdout: string;
+
+  const git = (...args: string[]): string =>
+    execFileSync("git", ["-C", repoDir, ...args], { encoding: "utf8" }).trim();
+
+  let base: string;
+  let top: string;
   try {
-    stdout = execFileSync("wt", args, { encoding: "utf8" });
+    // A detached HEAD has no branch name; base the new branch on its commit.
+    const head = git("rev-parse", "--abbrev-ref", "HEAD");
+    base = head === "HEAD" ? git("rev-parse", "HEAD") : head;
+    top = git("rev-parse", "--show-toplevel");
   } catch (error) {
     const detail = error instanceof Error ? error.message : String(error);
-    throw new Error(
-      `worktree: true, but \`wt ${args.join(" ")}\` failed. ` +
-        `Is worktrunk (wt) installed and ${repoDir} a git repository? ${detail}`,
-    );
+    throw new Error(`worktree: true, but ${repoDir} is not a usable git repository. ${detail}`);
   }
-  let worktreePath: unknown;
+
+  const add = (branch: string): string => {
+    const path = join(dirname(top), `${basename(top)}.${branch}`);
+    git("worktree", "add", "-b", branch, path, base);
+    return path;
+  };
+
   try {
-    worktreePath = JSON.parse(stdout)?.path;
-  } catch {
-    worktreePath = undefined;
+    return add(handle);
+  } catch (error) {
+    // A branch or directory from an earlier spawn is in the way. Use a fresh
+    // name rather than resetting code that may still be under review.
+    const fresh = `${handle}-${Date.now().toString(36)}`;
+    try {
+      return add(fresh);
+    } catch {
+      const detail = error instanceof Error ? error.message : String(error);
+      throw new Error(
+        `worktree: true, but \`git worktree add\` failed for ${handle} (then ${fresh}). ${detail}`,
+      );
+    }
   }
-  if (typeof worktreePath !== "string" || !worktreePath) {
-    throw new Error(`wt switch --create returned no path in ${repoDir}: ${stdout.trim()}`);
-  }
-  return worktreePath;
 }
 
 function getDefaultSessionDirFor(cwd: string, agentDir: string): string {
@@ -1356,7 +1359,7 @@ async function launchSubagent(
   // Opt-in worktree isolation (default off): create the worktree first, then
   // resolve paths against it so the child's cwd, project-local .pi/ config, and
   // session dir all point at the new checkout. Resolved before any pane exists
-  // so a wt failure aborts the spawn cleanly.
+  // so a worktree failure aborts the spawn cleanly.
   const repoDir = params.cwd ? resolve(process.cwd(), params.cwd) : ctx.cwd;
   const worktreeCwd = params.worktree
     ? createSubagentWorktree(params.name ?? params.agent, repoDir)

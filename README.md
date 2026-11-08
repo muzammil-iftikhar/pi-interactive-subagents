@@ -48,16 +48,16 @@ directory, still in its own pane:
 subagent({ agent: "worker", name: "fix-auth", task: "Fix the auth flow", worktree: true });
 ```
 
-The worktree is created with `wt -C <repo> switch --create <name> -b @ --no-cd
---format=json --yes` (worktree + branch off the spawn directory's current
-branch, no extra tmux window or agent). `name` becomes the branch/handle; `cwd`
-(or the caller's directory) selects the repository. The worktree is **left in
-place** after the sub-agent exits so you can review it and `wt merge` from inside
-it — it is never auto-removed. Resume (`subagent_message`) reopens in the same
-worktree.
+The worktree is created with plain `git worktree add -b <name> <repo>.<name>
+<base>` (worktree + branch off the spawn directory's current branch). `name`
+becomes the branch/handle; `cwd` (or the caller's directory) selects the
+repository. The worktree is **left in place** after the sub-agent exits so you
+can review it, and is removed with `git worktree remove <path>` then
+`git branch -d <branch>` — it is never auto-removed. Resume
+(`subagent_message`) reopens in the same worktree.
 
-This is opt-in: a normal spawn is untouched. Requires worktrunk (`wt`) on `PATH`
-and a git repository as the spawn directory.
+This is opt-in: a normal spawn is untouched. Requires git and a git repository
+as the spawn directory.
 
 ### Spawning
 
@@ -73,7 +73,7 @@ subagent({ agent: "worker", name: "dark-mode", task: "Implement the dark mode to
 | `name` | string | agent name | Display name for the pane and widget. Must be unique — duplicates are auto-suffixed (`scout`, `scout-2`, …) |
 | `model` | string | agent's model | Override the model for this spawn |
 | `cwd` | string | agent's `cwd` | Working directory (see [Role folders](#role-folders)) |
-| `worktree` | boolean | `false` | Run in a fresh git worktree created with `wt` (see [Worktrees](#worktrees)) |
+| `worktree` | boolean | `false` | Run in a fresh git worktree created with `git worktree add` (see [Worktrees](#worktrees)) |
 
 ### Messaging
 
