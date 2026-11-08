@@ -5,8 +5,10 @@
  *   - herdr.ts  (Herdr terminal app: `herdr-app` for panes, `hc` for terminals)
  *   - tmux.ts   (tmux panes, the original backend)
  *
- * tmux wins when pi runs inside a tmux session (`TMUX` is set); otherwise
- * Herdr, when `HC_TERMINAL_SOCKET` is set. Override per spawn with
+ * Herdr wins when pi runs inside a Herdr terminal (`HC_TERMINAL_SOCKET` is
+ * set), because a herdr terminal also sits inside whatever tmux session
+ * started it; falling through to tmux there would put subagents in tmux panes
+ * the person never looks at. Override per spawn with
  * `PI_SUBAGENT_MUX=herdr|tmux`.
  */
 import * as herdr from "./herdr.ts";
@@ -25,8 +27,8 @@ export function currentMux(): "herdr" | "tmux" | null {
   const forced = forcedBackend();
   if (forced === "herdr") return herdr.isHerdrAvailable() ? "herdr" : null;
   if (forced === "tmux") return tmux.isTmuxAvailable() ? "tmux" : null;
-  if (tmux.isTmuxAvailable()) return "tmux";
   if (herdr.isHerdrAvailable()) return "herdr";
+  if (tmux.isTmuxAvailable()) return "tmux";
   return null;
 }
 

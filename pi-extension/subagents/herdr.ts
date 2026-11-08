@@ -12,7 +12,9 @@
  * Splits always target the parent pi's pane (`$HC_TERMINAL_ID`), so new panes
  * land beside the agent rather than whatever the person happens to be focused
  * on, and focus is handed back after each split (`pane.focus`) since herdr —
- * unlike `tmux split-window -d` — focuses the new pane.
+ * unlike `tmux split-window -d` — focuses the new pane. Focus returns to the
+ * pane that was focused before the split, so someone viewing another space is
+ * left there instead of being switched back to pi's space.
  */
 import { execFile, execFileSync } from "node:child_process";
 import { promisify } from "node:util";
@@ -89,28 +91,82 @@ interface HerdrLane {
   pane?: string | null;
 }
 
+/** Every lane herdr knows about, in space/tab order. Empty when ls fails. */
+function listLanes(): HerdrLane[][] {
+  try {
+    const out = execFileSync("herdr-app", ["ls"], { encoding: "utf8" });
+    const data = JSON.parse(out) as {
+      spaces?: Array<{ tabs?: Array<{ terminals?: HerdrLane[] }> }>;
+    };
+    const tabs: HerdrLane[][] = [];
+    for (const space of data.spaces ?? []) {
+      for (const tab of space.tabs ?? []) {
+        tabs.push(tab.terminals ?? []);
+      }
+    }
+    return tabs;
+  } catch {
+    // Window closed or ls failed; focus handling is best-effort.
+    return [];
+  }
+}
+
 /**
  * Map a terminal address to the pane that shows it. Returns undefined when the
  * terminal is hidden (no pane) or the window is gone — callers then fall back
  * to herdr's own default (the focused pane).
  */
 function resolvePane(terminal: string): string | undefined {
-  try {
-    const out = execFileSync("herdr-app", ["ls"], { encoding: "utf8" });
-    const data = JSON.parse(out) as {
-      spaces?: Array<{ tabs?: Array<{ terminals?: HerdrLane[] }> }>;
-    };
-    for (const space of data.spaces ?? []) {
-      for (const tab of space.tabs ?? []) {
-        for (const lane of tab.terminals ?? []) {
-          if (lane.terminal === terminal && lane.pane) return lane.pane;
-        }
-      }
+  for (const lanes of listLanes()) {
+    for (const lane of lanes) {
+      if (lane.terminal === terminal && lane.pane) return lane.pane;
     }
-  } catch {
-    // Window closed or ls failed; focus handling is best-effort.
   }
   return undefined;
+}
+
+/** Panes sharing a terminal's tab, in layout order. */
+function tabPanes(terminal: string | undefined): string[] {
+  if (!terminal) return [];
+  for (const lanes of listLanes()) {
+    if (!lanes.some((lane) => lane.terminal === terminal)) continue;
+    return lanes.flatMap((lane) => (lane.pane ? [lane.pane] : []));
+  }
+  return [];
+}
+
+/**
+ * Make every pane in a tab the same width.
+ *
+ * herdr gives a new split all the space left over instead of half of its
+ * source pane, so two subagents beside pi end up 415px / 395px / 815px. An
+ * equal weight on each pane restores an even split, and because the weights
+ * are relative, closing a pane afterwards stays even on its own.
+ */
+function evenPanes(terminal: string | undefined): void {
+  for (const pane of tabPanes(terminal)) {
+    try {
+      herdrDo("layout.resize", ["--id", pane, "--weight", "1"]);
+    } catch {
+      // A pane can vanish between the listing and the resize; cosmetic.
+    }
+  }
+}
+
+/**
+ * Wait until a killed terminal's pane is gone, so re-evening sees the real
+ * layout. Bounded, so a stuck pane never hangs a close.
+ */
+function waitForPaneGone(terminal: string, timeoutMs = 1500): void {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (!resolvePane(terminal)) return;
+    try {
+      execFileSync("sleep", ["0.05"]);
+    } catch {
+      return;
+    }
+  }
 }
 
 /** Run a herdr-app command and return its JSON reply. */
@@ -125,16 +181,37 @@ function herdrDo(command: string, args: string[]): Record<string, any> {
   }
 }
 
-/** Give the keyboard back to the parent pane after a split. Best-effort. */
-function refocusParent(): void {
-  const terminal = parentTerminal();
-  const pane = terminal ? resolvePane(terminal) : undefined;
-  if (!pane) return;
+/**
+ * The pane herdr is currently showing, or undefined when status is unavailable.
+ *
+ * herdr displays exactly one space at a time, so focusing a pane is also what
+ * selects a space: this is how we hand the view back after a split.
+ */
+function focusedPane(): string | undefined {
+  try {
+    const out = execFileSync("herdr-app", ["status"], { encoding: "utf8" });
+    const data = JSON.parse(out) as { focused_pane?: string };
+    return typeof data.focused_pane === "string" ? data.focused_pane : undefined;
+  } catch {
+    // Window closed or status failed; focus handling is best-effort.
+    return undefined;
+  }
+}
+
+/** Focus a pane, best-effort. Focusing a pane also shows the space it lives in. */
+function focusPane(pane: string): void {
   try {
     herdrDo("pane.focus", ["--pane", pane]);
   } catch {
     // The pane list can shift while panes close; a lost focus is cosmetic.
   }
+}
+
+/** Give the keyboard back to the parent pane after a split. Best-effort. */
+function refocusParent(): void {
+  const terminal = parentTerminal();
+  const pane = terminal ? resolvePane(terminal) : undefined;
+  if (pane) focusPane(pane);
 }
 
 // ── Surface primitives ──
@@ -169,6 +246,11 @@ export function createSurfaceSplit(
     : (parentTerminal() ? resolvePane(parentTerminal()!) : undefined);
   if (source) args.push("--pane", source);
 
+  // Remember what the person was looking at before the split. herdr focuses the
+  // new pane and shows the space it lands in, so restoring this pane afterwards
+  // returns them to their own space instead of yanking them back to pi's.
+  const previousPane = focusedPane();
+
   const reply = herdrDo("pane.split", args);
   const terminal = typeof reply.terminal === "string" ? reply.terminal : "";
   if (!terminal) {
@@ -177,7 +259,9 @@ export function createSurfaceSplit(
     );
   }
 
-  refocusParent();
+  if (previousPane) focusPane(previousPane);
+  else refocusParent();
+  evenPanes(terminal);
   return terminal;
 }
 
@@ -269,6 +353,11 @@ export function closeSurface(surface: string): void {
       // Already gone.
     }
   }
+
+  // The pane goes away a moment after the terminal does; re-spread what is left
+  // once it has, so the remaining panes stay even.
+  waitForPaneGone(surface);
+  evenPanes(parentTerminal());
 }
 
 // ── Exit polling ──
