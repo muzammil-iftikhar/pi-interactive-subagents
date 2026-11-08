@@ -1,12 +1,12 @@
 # pi-interactive-subagents
 
-Async subagents for [pi](https://github.com/badlogic/pi-mono), running in tmux panes. Spawn a sub-agent, keep working in the main session, and get the result steered back when it finishes. Fully non-blocking.
+Async subagents for [pi](https://github.com/badlogic/pi-mono), running in herdr or tmux panes. Spawn a sub-agent, keep working in the main session, and get the result steered back when it finishes. Fully non-blocking.
 
-**tmux-only fork.** See [Acknowledgements](#acknowledgements) for the upstream project, which also supports cmux, zellij, and WezTerm.
+**Two backends.** `herdr.ts` (Herdr app) is used when pi runs inside a Herdr terminal; `tmux.ts` otherwise. See [Acknowledgements](#acknowledgements) for the upstream project, which also supports cmux, zellij, and WezTerm.
 
 ## How it works
 
-`subagent()` returns immediately. The sub-agent runs in its own tmux pane — a right split off the parent pi pane, so pane creation never steals keyboard focus. A live widget above the input tracks every running sub-agent, and when one finishes, its result is steered into the main session as a notification that triggers a new turn.
+`subagent()` returns immediately. The sub-agent runs in its own pane — a right split off the parent pi pane — and focus goes back to pi afterwards (Herdr focuses a new split, so the extension hands the keyboard back). A live widget above the input tracks every running sub-agent, and when one finishes, its result is steered into the main session as a notification that triggers a new turn.
 
 ```
 ╭─ Subagents ──────────────────────────── 2 running ─╮
@@ -17,7 +17,9 @@ Async subagents for [pi](https://github.com/badlogic/pi-mono), running in tmux p
 
 Spawn several in parallel — they run concurrently and steer results back independently as each finishes.
 
-Panes are kept evenly sized: the extension re-applies an `even-horizontal` layout after every spawn and exit (debounced). The layout is a single constant, `SUBAGENT_TMUX_LAYOUT` in `pi-extension/subagents/tmux.ts` — change it to any named tmux layout (`main-vertical`, `tiled`, …).
+Panes are kept evenly sized: on tmux the extension re-applies an `even-horizontal` layout after every spawn and exit (debounced). The layout is a single constant, `SUBAGENT_TMUX_LAYOUT` in `pi-extension/subagents/tmux.ts` — change it to any named tmux layout (`main-vertical`, `tiled`, …). Herdr sizes its own splits, so the herdr path does not re-balance.
+
+Pick the backend explicitly with `PI_SUBAGENT_MUX=herdr|tmux`; otherwise herdr wins when `HC_TERMINAL_SOCKET` is set and tmux is the fallback.
 
 If your shell startup is slow and launch commands get dropped before the prompt is ready, raise the delay:
 
@@ -29,7 +31,7 @@ export PI_SUBAGENT_SHELL_READY_DELAY_MS=2500   # default: 500
 
 | Tool | Description |
 | --- | --- |
-| `subagent` | Spawn a sub-agent in a dedicated tmux pane (async) |
+| `subagent` | Spawn a sub-agent in a dedicated pane (async) |
 | `subagent_message` | Message a sub-agent by name — steers it if running, resumes its session if finished |
 | `subagents_list` | List available agent definitions |
 | `ask_question` | *(sub-agent sessions only)* Ask the orchestrator a question and wait for the reply |
@@ -202,11 +204,15 @@ Status display is configured via `config.json` in the extension directory (copy 
 ## Requirements
 
 - [pi](https://github.com/badlogic/pi-mono)
-- [tmux](https://github.com/tmux/tmux)
+- Either backend, matching where pi runs:
+  - [Herdr](https://herdr.dev) — `herdr-app` and `hc` on `PATH`, pi started in a Herdr terminal (detected via `HC_TERMINAL_SOCKET`)
+  - [tmux](https://github.com/tmux/tmux)
 
 ```bash
-tmux new -A -s pi 'pi'
+tmux new -A -s pi 'pi'   # tmux backend
 ```
+
+In Herdr, just open a pane and run `pi` — no setup beyond the two binaries.
 
 ## Acknowledgements
 
